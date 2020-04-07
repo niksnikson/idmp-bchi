@@ -6,6 +6,9 @@ library(e1071)
 library(caTools) 
 library(randomForest)
 library(caret) 
+library(data.table)
+library(mlr)
+library(xgboost)
 # load data
 data <- read.csv("../Data/heart.csv")
 
@@ -197,6 +200,11 @@ cm
 
 confusionMatrix(cm)
 
+classifier = randomForest(x = train[-14],
+                          y = train$target,
+                          ntree = 500, random_state = 0)
+plot(classifier)
+
 #------------------------------------------------------------------------#
 # randonm forest using 4 vars
 data_s = select(data,c('cp', 'thalach', 'exang', 'oldpeak','target'))
@@ -209,16 +217,96 @@ dim(train1)
 dim(test1)
 
 # initialise randomforest
-rf <- randomForest(
+rf1 <- randomForest(
   target ~ .,
   data=train1
 )
 
 #predict
-pred1 = predict(rf, newdata=test1[-5])
+pred1 = predict(rf1, newdata=test1[-5])
 
 #confusion matrix
 cm1 = table(test1[,5], pred1)
 cm1
 
 confusionMatrix(cm1)
+
+###
+
+classifier1 = randomForest(x = train1[-5],
+                          y = train1$target,
+                          ntree = 500, random_state = 0)
+plot(classifier1)
+
+
+#----------------------------------------------------#
+
+#xgboost
+split = sample.split(data$target, SplitRatio = 0.8) 
+
+train = subset(data, split == TRUE) 
+test = subset(data, split == FALSE) 
+
+#convert data frame to data table
+setDT(train) 
+setDT(test)
+
+#using one hot encoding 
+labels <- train$target 
+ts_label <- test$target
+new_tr <- model.matrix(~.+0,data = train[,-c("target"),with=F]) 
+new_ts <- model.matrix(~.+0,data = test[,-c("target"),with=F])
+
+#convert factor to numeric 
+labels <- as.numeric(labels)+2
+ts_label <- as.numeric(ts_label)+2
+
+#preparing matrix 
+dtrain <- xgb.DMatrix(data = new_tr,label = labels) 
+dtest <- xgb.DMatrix(data = new_ts,label=ts_label)
+
+#default parameters
+params <- list(booster = "gbtree", objective = "binary:logistic", 
+               eta=0.3, gamma=0, max_depth=6, min_child_weight=1, 
+               subsample=1, colsample_bytree=1)
+
+xgbcv <- xgb.cv( params = params, data = dtrain, nrounds = 100, 
+                 nfold = 5, showsd = T, stratified = T, 
+                 print_every_n = 10, early_stop_round = 20, maximize = F)
+
+min(xgbcv$test.error.mean)
+
+
+xgb1 <- xgb.train (params = params, data = dtrain, nrounds = 79, 
+                   watchlist = list(val=dtest,train=dtrain), 
+                   print_every_n = 10, early_stop_round = 10, 
+                   maximize = F , eval_metric = "error")
+
+#model prediction
+xgbpred <- predict (xgb1,dtest)
+xgbpred <- ifelse (xgbpred > 0.5,1,0)
+
+#confusion matrix
+confusionMatrix (xgbpred, ts_label)
+
+xgbpred <- as.factor(xgbpred)
+ts_label <- as.factor(ts_label)
+
+#view variable importance plot
+mat <- xgb.importance (feature_names = colnames(new_tr),model = xgb1)
+xgb.plot.importance (importance_matrix = mat[1:13]) 
+
+
+#------------------------------------------------------------------#
+#Feature selection using random forest
+
+# define the control using a random forest selection function
+control <- rfeControl(functions=rfFuncs, method="cv", number=10)
+# run the RFE algorithm
+results <- rfe(data[,1:13], data[,14], sizes=c(1:13), rfeControl=control)
+# summarize the results
+print(results)
+# list the chosen features
+predictors(results)
+# plot the results
+plot(results, type=c("g", "o"))
